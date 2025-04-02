@@ -30,7 +30,7 @@ def match_features(desc1, desc2):
     matches = flann.knnMatch(desc1, desc2, k=2)
     
     # apply Lowe's ratio test
-    good_matches = [m for m, n in matches if m.distance < 0.7 * n.distance]
+    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
     
     return good_matches
 
@@ -42,7 +42,7 @@ def find_homography(kp1, kp2, matches):
     src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
     
-    homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.0)
+    homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
     
     return homography
     
@@ -57,45 +57,45 @@ def warp_and_blend(image1, image2, H):
     h2, w2 = image2.shape[:2]
 
     # defining corners of both the images
-    corners1 = np.float32([[0, 0], [w1, 0], [w1, h1], [0, h1]]).reshape(-1, 1, 2)
-    corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
-
+    corners = np.array([[0, 0], [w1, 0], [w1, h1], [0, h1], [0, 0], [w2, 0], [w2, h2], [0, h2]], dtype=np.float32)
+    
     # transform the first image corners
-    transformed_corners1 = cv2.perspectiveTransform(corners1, H)
+    transformed_corners = cv2.perspectiveTransform(corners[:4].reshape(-1, 1, 2), H).reshape(-1, 2)
 
     # stacking all the corners together
-    all_corners = np.vstack((transformed_corners1, corners2))
+    all_corners = np.vstack((transformed_corners,  corners[4:]))
 
     # to compute bounding box dimensions that will enclose both the images
     # will be used to define the dimensions of the new canvas that will hold the images after stitching
-    x_min, y_min = np.int32(all_corners.min(axis=0).ravel())
-    x_max, y_max = np.int32(all_corners.max(axis=0).ravel())
+    x_min, y_min = np.int32(all_corners.min(axis=0))
+    x_max, y_max = np.int32(all_corners.max(axis=0))
 
-    # tompute translation matrix to shift coordinates
+    # to compute translation matrix to shift coordinates
     translation = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]])
 
-    # warp image1 to the new coordinate system
-    warped_image1 = cv2.warpPerspective(image1, translation @ H, (x_max - x_min, y_max - y_min))
+    result = cv2.warpPerspective(image1, translation @ H, (x_max - x_min, y_max - y_min))
+    
+    result[-y_min:h2 - y_min, -x_min:w2 - x_min] = image2
 
     # to create a blank canvas that is large enough for both images
-    canvas = np.zeros_like(warped_image1, dtype=np.uint8)
+    canvas = np.zeros_like(result, dtype=np.uint8)
 
     # to overlay image2 onto the warped image1
     x_offset, y_offset = -x_min, -y_min
     canvas[y_offset:y_offset+h2, x_offset:x_offset+w2] = image2
 
     # converting images to float32 for blending
-    warped_image1 = warped_image1.astype(np.float32)
+    result = result.astype(np.float32)
     canvas = canvas.astype(np.float32)
 
     # apply intensity adjustment to achieve uniform brightness
-    mask1 = (warped_image1 > 0).astype(np.uint8) * 255
+    mask1 = (result > 0).astype(np.uint8) * 255
 
     # compute blending mask (gaussian blur for smooth transition)
     blend_mask = cv2.GaussianBlur(mask1, (21, 21), 10)
     blend_mask = blend_mask.astype(np.float32) / 255.0
 
-    blended_image = (warped_image1 * blend_mask + canvas * (1 - blend_mask)).astype(np.uint8)
+    blended_image = (result * blend_mask + canvas * (1 - blend_mask)).astype(np.uint8)
 
     return blended_image
 
