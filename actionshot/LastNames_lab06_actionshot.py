@@ -2,38 +2,34 @@ import cv2
 import numpy as np
 
 
-def create_action_shot(video_path, output_path, num_frames=10, alpha=0.5, threshold=30):
+def create_action_shot(video_path, output_path, num_frames=10, threshold=30):
     """
-    Create an action shot from a video by compositing multiple frames.
+    Create an action shot preserving all movement positions without blending.
 
     Parameters:
-        video_path (str): Path to input video file
-        output_path (str): Path to save output image
-        num_frames (int): Number of frames to composite (default: 10)
-        alpha (float): Blending weight for new frames (0-1, default: 0.5)
-        threshold (int): Motion threshold to detect moving objects (default: 30)
+        video_path (str): Input video path
+        output_path (str): Output image path
+        num_frames (int): Number of frames to process
+        threshold (int): Motion detection threshold
     """
-    # Open the video file
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Error: Could not open video file")
         return
 
-    # Read the first frame as background
-    ret, background = cap.read()
+    # Initialize background subtractor
+    backSub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
+
+    # Read first frame as base image
+    ret, action_shot = cap.read()
     if not ret:
         print("Error: Could not read video frames")
         return
 
-    # Convert background to grayscale for motion detection
-    background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
-    background_gray = cv2.GaussianBlur(background_gray, (21, 21), 0)
-
-    # Initialize the action shot with the first frame
-    action_shot = background.copy()
-
     frame_count = 0
-    skip_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // num_frames)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    skip_frames = max(1, total_frames // num_frames)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
     while True:
         ret, frame = cap.read()
@@ -44,42 +40,33 @@ def create_action_shot(video_path, output_path, num_frames=10, alpha=0.5, thresh
         if frame_count % skip_frames != 0:
             continue
 
-        # Process current frame
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+        # Get foreground mask using background subtraction
+        fg_mask = backSub.apply(frame)
 
-        # Compute difference between current frame and background
-        frame_diff = cv2.absdiff(background_gray, gray)
-        _, thresh = cv2.threshold(frame_diff, threshold, 255, cv2.THRESH_BINARY)
+        # Refine the mask
+        _, thresh = cv2.threshold(fg_mask, threshold, 255, cv2.THRESH_BINARY)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
 
-        # Find contours of moving objects
-        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Create a mask for moving objects
+        # Create object mask
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         mask = np.zeros_like(thresh)
         for contour in contours:
-            if cv2.contourArea(contour) > 500:  # Filter small contours
+            if cv2.contourArea(contour) > 500:
                 cv2.drawContours(mask, [contour], 0, 255, -1)
 
-        # Blend the moving objects into the action shot
-        mask = mask.astype(bool)
-        action_shot[mask] = (alpha * frame[mask] + (1 - alpha) * action_shot[mask]).astype(np.uint8)
+        # Only update new regions not previously modified
+        update_mask = cv2.bitwise_and(mask, cv2.bitwise_not(action_shot[:, :, 0]))
+        action_shot = np.where(update_mask[..., None], frame, action_shot)
 
-        # Update background for next iteration
-        background_gray = gray.copy()
-
-        # Early exit if we've processed enough frames
         if frame_count >= num_frames * skip_frames:
             break
 
-    # Save the final action shot
     cv2.imwrite(output_path, action_shot)
     print(f"Action shot saved to {output_path}")
-
-    # Release resources
     cap.release()
 
 
-# Example usage
+# Usage
 if __name__ == "__main__":
-    create_action_shot("input_video_fb.mp4", "action_shot.jpg", num_frames=8, alpha=0.3)
+    create_action_shot("input_video.MOV", "action_shot.jpg", num_frames=6, threshold=25)
